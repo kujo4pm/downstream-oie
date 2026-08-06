@@ -45,7 +45,8 @@ CREATE TABLE instrument_results (
     senaite_id TEXT NOT NULL REFERENCES instrument_worklist(senaite_id),
     value TEXT,
     unit TEXT,
-    ref_range TEXT,
+    ref_range_low NUMERIC,
+    ref_range_high NUMERIC,
     received_at TIMESTAMP DEFAULT NOW(),
     posted_to_fhir BOOLEAN DEFAULT FALSE,
     fhir_observation_id TEXT
