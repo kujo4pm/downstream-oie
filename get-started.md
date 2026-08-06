@@ -29,6 +29,7 @@ CREATE TABLE diagnostic_report_ids (
 ```
 CREATE TABLE instrument_worklist (
     senaite_id TEXT PRIMARY KEY,
+    device_fhir_id TEXT,
     fhir_id TEXT NOT NULL,
     analyte_code TEXT NOT NULL,
     analyte_display TEXT NOT NULL,
@@ -45,8 +46,7 @@ CREATE TABLE instrument_results (
     senaite_id TEXT NOT NULL REFERENCES instrument_worklist(senaite_id),
     value TEXT,
     unit TEXT,
-    ref_range_low NUMERIC,
-    ref_range_high NUMERIC,
+    ref_range TEXT,
     received_at TIMESTAMP DEFAULT NOW(),
     posted_to_fhir BOOLEAN DEFAULT FALSE,
     fhir_observation_id TEXT
