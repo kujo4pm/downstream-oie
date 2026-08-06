@@ -1,0 +1,20 @@
+services:
+  engine:
+    image: openintegrationengine/engine:4.5.2-alpine
+    environment:
+      - SENAITE_PASSWORD=egadminpassword
+    volumes:
+      - ~/oie-appdata:/opt/engine/appdata
+      - ~/oie-custom-lib:/opt/engine/custom-lib
+    ports:
+      - "8443:8443"
+  db:
+    image: postgres
+    environment:
+      - POSTGRES_USER=enginedb
+      - POSTGRES_PASSWORD=egpassword
+      - POSTGRES_DB=enginedb
+    volumes:
+      - ~/oie-pgdata:/var/lib/postgresql
+    ports:
+      - "5432:5432"
