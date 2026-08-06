@@ -23,9 +23,57 @@ CREATE TABLE diagnostic_report_ids (
 );"
 ```
 
+
+- [] Download DBeaver community edition. Connect to the database and create:
+
+```
+CREATE TABLE instrument_worklist (
+    senaite_id TEXT PRIMARY KEY,
+    fhir_id TEXT NOT NULL,
+    analyte_code TEXT NOT NULL,
+    analyte_display TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'pending', -- pending | dispatched | resulted
+    fetched_at TIMESTAMP DEFAULT NOW(),
+    dispatched_at TIMESTAMP,
+    resulted_at TIMESTAMP,
+    attempts INT DEFAULT 0,
+    last_error TEXT
+);
+
+CREATE TABLE instrument_results (
+    id SERIAL PRIMARY KEY,
+    senaite_id TEXT NOT NULL REFERENCES instrument_worklist(senaite_id),
+    value TEXT,
+    unit TEXT,
+    ref_range TEXT,
+    received_at TIMESTAMP DEFAULT NOW(),
+    posted_to_fhir BOOLEAN DEFAULT FALSE,
+    fhir_observation_id TEXT
+);
+```
+
+- [ ]
+
 ## Notes
 - Just use the HTTP listener - there is NO explicity FHIR layer here.
 
 ## Idea
 - Need to set up an OIE instance on a server that speaks with Senaite.fhir running on demo.
-- 
+
+
+```
+[SENAITE FHIR API] --poll-->[Ch1: fetch-instrument-worklist]--INSERT-->[Postgres: instrument_worklist]
+                                                                              |
+                                                            [Ch2: dispatch-instrument-orders]
+                                                            (polls table WHERE status='pending')
+                                                                              |
+                                                                    HL7 ORM^O01 → instrument
+                                                                              v
+                                                                [Ch3: simulated-instrument]
+                                                                              |
+                                                                    HL7 ORU^R01 (auto result)
+                                                                              v
+                                                          [Ch4: receive-instrument-results]
+                                                          (local DB lookup, not live search)
+                                                          POST Observation → SENAITE FHIR API
+```
