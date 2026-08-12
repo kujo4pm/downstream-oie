@@ -1,3 +1,6 @@
+
+
+# Initial Set up
 Please note these are the steps for Mac Silicon M2 chip which includes a LOT of fiddling about.
 
 Steps here: 
@@ -26,7 +29,7 @@ CREATE TABLE diagnostic_report_ids (
 
 - [] Download DBeaver community edition. Connect to the database and create:
 
-```
+```sql
 CREATE TABLE instrument_worklist (
     senaite_id TEXT PRIMARY KEY,
     device_fhir_id TEXT,
@@ -50,6 +53,13 @@ CREATE TABLE instrument_results (
     received_at TIMESTAMP DEFAULT NOW(),
     posted_to_fhir BOOLEAN DEFAULT FALSE,
     fhir_observation_id TEXT
+);
+
+CREATE TABLE dispatched_orders_log (
+    id SERIAL PRIMARY KEY,
+    senaite_id TEXT NOT NULL,
+    hl7_message TEXT NOT NULL,
+    logged_at TIMESTAMP DEFAULT NOW()
 );
 ```
 
