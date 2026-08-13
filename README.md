@@ -2,9 +2,11 @@
 
 A companion to the [SENAITE FHIR Implementation Guide](https://fhir.senaite.org/), specifically the [Instrument Integration workflow](https://fhir.senaite.org/instrument-integration.html).
 
-This describes how to configure [Open Integration Engine](https://openintegrationengine.org/) (OIE) as a middleware layer so instruments speaking HL7v2 — or ASTM, via the same pattern — can participate in a FHIR R5 laboratory workflow. SENAITE remains the system of record; OIE owns only protocol translation and the delivery state machine.
+This describes how to configure [Open Integration Engine](https://openintegrationengine.org/) (OIE) as a middleware layer so instruments speaking **HL7v2 over MLLP** can participate in SENAITE's FHIR R5 laboratory workflow. SENAITE remains the system of record; OIE owns only protocol translation and the delivery state machine.
 
-The intent is that **clients own their own instrument configurations**. The channels here are the reusable scaffold; the instrument-specific parts (transport, message dialect, field positions) are isolated to two channels, so a site can swap in their analyzer without touching the FHIR side.
+The intent is that **clients own their own instrument configurations**. The channels here are the reusable scaffold; the instrument-specific parts (message dialect, field positions) are isolated to two channels, so a site can swap in another HL7v2 analyzer without touching the FHIR side.
+
+**ASTM instruments are not covered by this pattern.** OIE has no support for the ASTM E1381 lower-layer protocol, so an ASTM analyzer cannot be served by swapping a connector on the two instrument-facing channels — it needs an additional component in front of OIE. See [§7 ASTM Support](#7-astm-support) for the two candidate routes, both work in progress.
 
 > OIE is a community fork of Mirth Connect, created after NextGen moved Mirth to a commercial licence at v4.6. Channels are format-compatible in both directions, so everything here transfers to a licensed Mirth deployment.
 
@@ -26,7 +28,7 @@ The intent is that **clients own their own instrument configurations**. The chan
 
 On **Apple Silicon**: the published OIE images are single-arch (amd64) despite documentation suggesting otherwise. Omit `--platform` and let Docker Desktop run under Rosetta — slower to boot, functionally fine. Passing `platform: linux/arm64` in Compose fails rather than degrades.
 
-Create the persistent directories under one parent. Mismatched host paths between Compose and reality is the easiest way to convince yourself your channels have been wiped when they haven't:
+Create the persistent directories under one parent:
 
 ```bash
 mkdir -p ~/dev/oie-appdata ~/dev/oie-custom-lib ~/dev/oie-pgdata
@@ -165,9 +167,11 @@ CREATE TABLE dispatched_orders_log (
 | Record | SENAITE + FHIR R5 API | Clinical source of truth. Owns FHIR logical IDs. |
 | Integration | OIE channels | Protocol translation, field mapping, retry, dispatch state |
 | State | Postgres `senaite_tracking` | Delivery watermarks and audit; **never** clinical truth |
-| Transport | MLLP/TCP (HL7v2), serial or file (ASTM) | Instrument-facing wire protocol |
+| Transport | MLLP over TCP (HL7v2) | Instrument-facing wire protocol |
 
 The state layer holds no clinical data that isn't already in SENAITE. If it is lost, the correct recovery is to re-poll SENAITE, not to reconstruct records from the middleware.
+
+The transport layer is MLLP only. Anything else — ASTM E1381, HLLP, raw serial — requires a component upstream of OIE (§7).
 
 ### 2.2 Channels
 
@@ -212,7 +216,9 @@ The state layer holds no clinical data that isn't already in SENAITE. If it is l
 | `receive-instrument-results` | TCP Listener :6663 (HL7, auto-ACK) | JavaScript Writer → insert | **Yes** |
 | `post-observations-to-fhir` | JavaScript Reader (SQL JOIN → list), 5 s | HTTP Sender → POST Observation | No |
 
-Only the two marked channels touch the wire format. **To support a different instrument, or ASTM instead of HL7v2, replace those two and leave the rest untouched.** For ASTM this means swapping the TCP Sender for the appropriate transport and replacing the Message Builder steps with ASTM record construction; the database contract on either side is unchanged.
+Only the two marked channels touch the wire format. **To support a different HL7v2 analyzer, replace those two and leave the rest untouched** — the database contract on either side is the interface. In practice that means adjusting segment and field positions (§3.4) and the outbound Message Builder steps (§3.3) to the analyzer's dialect.
+
+This isolation covers HL7v2 dialect variation. It does not extend to ASTM: that is a change of lower-layer protocol, not of field positions, and OIE cannot terminate it at all. See §7.
 
 The 5-second poll intervals are for development. Tune to the site's latency tolerance before deployment.
 
@@ -245,6 +251,8 @@ Real, documented limitations rather than configuration errors. Record them for w
 
 *Consequence:* all database access uses raw JDBC (`java.sql.DriverManager`) inside JavaScript Reader/Writer connectors, which runs in the JS engine's classloader and is unaffected. Treat Database Reader/Writer as unavailable on this stack.
 
+**No ASTM E1381 support.** There is no ASTM connector, transmission mode or data type in OIE. The TCP Listener speaks MLLP or raw TCP; it has no ENQ/ACK/EOT state machine, no `STX`/`ETX` frame handling and no checksum verification, and there is no ASTM E1394 record parser. Pointing an MLLP listener at an ASTM analyzer produces a connection with no parsed messages. This is a platform gap, not a configuration problem — see §7.
+
 **Fanning out one poll into many messages.** A JavaScript Reader returning a `java.util.ArrayList` of strings causes OIE to process one message per entry. This is the documented mechanism that lets a SQL query drive per-row processing while still using native per-message transformers and connectors downstream.
 
 **Outbound HL7 is built with Message Builder steps, not string concatenation.** Paste a skeleton into the destination's **Outbound Message Template** with data type `HL7 v2.x`, then add one Message Builder step per field. The two fields behave differently:
@@ -274,12 +282,13 @@ Inside a JavaScript Writer, `connectorMessage.getRawData()` returns the original
 
 Docker is appropriate for development. For a site deployment:
 
-- **Run OIE as a service on a dedicated host** (`systemd`), not in a container, so JVM heap, MLLP port bindings and serial devices (for ASTM) are managed directly by the OS. Instrument connectivity in particular is easier without container network translation.
+- **Run OIE as a service on a dedicated host** (`systemd`), not in a container, so JVM heap and MLLP port bindings are managed directly by the OS. Instrument connectivity in particular is easier without container network translation.
 - **Postgres on its own host or a managed instance**, with real backups. OIE's internal store should also move off embedded Derby to Postgres at this point.
 - **One OIE instance per environment.** There is no environment switch inside OIE; dev/test/prod are separate instances differing only in Configuration Map values.
 - **Version-control channels with [MirthSync](https://github.com/SagaHealthcareIT/mirthsync)** (OIE-compatible). Author in the Administrator, export to git, review the XML diffs, promote by pushing to the target instance via CI. Secrets never enter the repo.
 - **Network placement:** instrument-facing MLLP ports on a segmented lab network; only FHIR egress needs to reach SENAITE. OIE is the only component that sees both.
 - **There is no established automated test framework** for Mirth/OIE channels. Practically: scripted integration tests — fire known HL7 payloads at a staging instance, then assert on the resulting FHIR resources and `instrument_worklist` rows. Worth building as a harness; nothing off-the-shelf exists.
+- **If an ASTM route is in scope**, note that whichever option in §7 is chosen adds a second process (senaite.astm) or a licensed extension (Meditecs) to the deployment. Serial devices additionally need a serial-to-TCP converter on the lab network.
 
 ---
 
@@ -503,7 +512,7 @@ Mapper steps extract the fields. **These positions are the part a client changes
 | `unit` | `msg['OBX']['OBX.6']['OBX.6.1'].toString()` |
 | `refRange` | `msg['OBX']['OBX.7']['OBX.7.1'].toString()` |
 
-**Destination:** JavaScript Writer. The reference range is stored verbatim; parsing is deferred until it is actually needed for `Observation.referenceRange` (§5, gap 1):
+**Destination:** JavaScript Writer. The reference range is stored verbatim; parsing is deferred until it is actually needed for `Observation.referenceRange` (§6, gap 1):
 
 ```javascript
 var senaiteId = channelMap.get('senaiteId');
@@ -681,7 +690,7 @@ if (body.resourceType === 'Observation') {
 conn.close();
 ```
 
-`fhir_observation_id` stores what the **server returns**, not the client-generated UUID — see §5, gap 2.
+`fhir_observation_id` stores what the **server returns**, not the client-generated UUID — see §6, gap 2.
 
 ---
 
@@ -742,7 +751,129 @@ Two options; the second is preferable for demonstrating the full round trip.
 
 ---
 
-## 5. Known Gaps
+## 5. ASTM Support
+
+**Status: work in progress. Neither route below is implemented or proven against this channel set.**
+
+### 5.1 Why OIE cannot do this alone
+
+ASTM instrument communication is two standards stacked:
+
+- **ASTM E1381** (also CLSI LIS01) — the lower-layer protocol. A stateful session: `ENQ` to request the line, `ACK`/`NAK` in reply, then records wrapped as `STX` + frame number + data + `ETB`/`ETX` + checksum, each individually acknowledged, closed with `EOT`.
+- **ASTM E1394** (also CLSI LIS02) — the message content. `H`/`P`/`O`/`R`/`C`/`Q`/`L` record types with their own field, repeat and component delimiters.
+
+OIE implements neither. Its TCP Listener speaks MLLP or raw TCP, so it has no handshake state machine, no frame checksum verification and no E1394 parser. An ASTM analyzer pointed at an MLLP listener opens a connection and delivers nothing parseable.
+
+This is not a field-mapping problem and cannot be solved by editing the two instrument-specific channels (§2.2). It requires either a component in front of OIE that terminates E1381 and forwards structured data (§5.2), or a connector plugin that adds the protocol to OIE itself (§5.3).
+
+### 5.2 Route A — senaite.astm upstream of OIE
+
+[`senaite/senaite.astm`](https://github.com/senaite/senaite.astm) is a Python asyncio server maintained in the SENAITE organisation. It already implements the parts OIE lacks.
+
+**What it provides:**
+
+| Capability | Location |
+|---|---|
+| E1381 framing and session state machine | `transports/astm/framing.py`, `transports/astm/protocol.py` |
+| E1394 record parsing | `records.py`, `codec.py` |
+| MLLP + HL7v2 transport (separate listener) | `transports/hl7/`, `cli/hl7_server.py` |
+| Synthesiser for devices that do not emit valid ASTM | `transports/astm/synthesizer.py` |
+| Pluggable output pipeline | `core/pipeline.py` |
+| Push to SENAITE via `senaite.jsonapi` | `core/lims.py`, `sender.py` |
+
+**Instrument drivers present** (`instruments/`): Roche cobas c111 and c311, Sysmex XN and XP, Horiba Pentra XLR and Yumizen H5xx, Abbott Afinion2, Hitachi 7600, Cepheid GeneXpert, Siemens DCA Vantage, bioMérieux mini VIDAS, Arkray Spotchem EL. Captured message samples for most of these live in `tests/data/`.
+
+`instruments/genexpert.py` is written against GeneXpert LIS Interface Protocol Specification 302-2261 Rev. E (2022), covering Dx v4.7b+, Omni Mobile 1.2+, Xpress 5.1+, Infinity Xpertise v6.4b+ and Cepheid OS 1.0+.
+
+**Proposed wiring.** `core/pipeline.py` runs an ordered list of async handlers with per-handler exception isolation and a dead-letter hook. `cli/astm_server.py` currently assembles `DiskCaptureHandler` and `LimsPushHandler`. Adding an OIE forwarder means a sibling handler on that list — the existing SENAITE push path can stay enabled alongside it.
+
+```
+instrument --E1381/TCP--> senaite.astm --HTTP JSON--> OIE HTTP Listener
+                          (protocol only)              │
+                                                       ▼
+                                           [receive-astm-results]
+                                           ──insert──► instrument_results
+                                                       │
+                                                       ▼
+                                           [post-observations-to-fhir]   (unchanged)
+```
+
+**Forward the parsed envelope, not HL7v2.** Converting to HL7v2 first would let the existing `receive-instrument-results` channel be reused verbatim, but everything then has to fit through `OBX`. `SenaiteObservation` carries detection limits, reference ranges, method coding, performer and verifier identity and cheminformatics extensions; the overlap with `OBX` is incomplete, so the remainder lands in `NTE` or a Z-segment and the OIE transformer scrapes free text to rebuild structure that was already parsed cleanly one hop earlier. Forwarding the envelope keeps OIE as a router and transformer over structured data. The cost is a new source channel rather than reuse of the HL7 one.
+
+`core/lims.py` `Session` preflights for `senaite.jsonapi` at the target and builds paths as `{url}/{API_BASE_URL}/push`, so it is SENAITE-shaped and cannot simply be repointed at OIE with `--url`. Hence a new handler rather than a configuration change. It is plain `requests`; nothing about it is difficult.
+
+**What is missing:**
+
+- **No FHIR.** There is no occurrence of `fhir` anywhere in the codebase. Output is LIS2-A/ASTM payloads to the JSON API.
+- **No orders outbound.** The `Q` (query) record type is defined in `records.py`, but nothing in the protocol layer handles host-query mode. IG step 3 — worklist transmission to the instrument — has no implementation. This gap is independent of the routing decision and OIE cannot fill it.
+- **No published releases.** Pin a commit and own that decision.
+- **Forks outnumber stars**, which usually indicates sites patching in their own drivers rather than contributing upstream. Confirm with the Naralabs team what is considered supported before depending on it.
+
+### 5.3 Route B — Meditecs ASTM Extension for OIE
+
+A commercial connector plugin: [ASTM Extension for Open Integration Engine](https://www.meditecs.com/astm-extension-for-open-integration-engine/). This is the option that keeps everything inside OIE.
+
+**Take the OIE build, not the Mirth one.** They are separate products; the Mirth extension supports open-source Mirth up to 4.5.2 only and is explicitly incompatible with 4.6.0 and later.
+
+**What it adds:** "ASTM Listener" and "ASTM Sender" connectors with a graphical configuration panel; outbound message templates for channel destinations; all three E1381 revisions (-91, -95, -02); TCP client or server operation; multiple connections on one port; CP-1252 encoding; and listener and sender sharing a single ASTM connection to one device. Serial instruments need a serial-to-TCP converter (MOXA is named). Roche Elecsys and Cobas frame structures are called out as specifically supported.
+
+**Why it is worth trialling despite the cost.** The ASTM Sender is the only route among the options here that gives orders outbound, so it is the only one that can satisfy IG step 3 without new protocol work. It also keeps frame-level traffic visible in the OIE dashboard rather than in a second process's logs.
+
+**Pricing:** €100/month (€1,200 annually) for one OIE instance and one device; €200/month (€2,400 annually) for up to five. A 30-day trial requires no credit card. The licence excludes professional services for device integration; a quote can be requested with the trial.
+
+**Trial plan.** Request Pro, not Smart — both are free for the trial month and Smart caps at one device. Do not start the clock until the analyzer is configured, on the network and reachable from the OIE host, or the window goes on cabling. Then prove, in order:
+
+1. ASTM Listener receives and frames decode
+2. Decoded payload reaches a transformer and maps to `SenaiteObservation`
+3. Observation lands in SENAITE against the correct ServiceRequest
+4. ASTM Sender delivers an order the instrument accepts
+
+Capture a byte-level trace of a successful exchange while the trial is live. If Route A is chosen later, that trace is the test fixture.
+
+**Open question:** an OIE maintainer, replying to [OIE discussion #170](https://github.com/OpenIntegrationEngine/engine/discussions/170), noted the extension should work with OIE but suggested confirming with the vendor. A user in the same thread reports running it in two labs without issues but does not specify OIE or Mirth. Confirm compatibility with the pinned OIE version when requesting the trial.
+
+### 5.4 Route C — build an open-source connector
+
+Considered and not recommended for this project. Rough scope: 1–2 weeks for E1381 framing and state machine (one revision, results only), 2–4 weeks for OIE connector plugin scaffolding and the Swing configuration UI, 2–4 weeks for bidirectional operation over a shared connection, plus an unbounded tail of per-vendor frame quirks. Against €1,200/year that arithmetic does not work, and most of the effort is plugin integration wrapping protocol handling that senaite.astm already has.
+
+Requests for an open-source ASTM connector recur on the Mirth forums from 2010 onward and have never landed upstream, including at least one working LIS-1/E1381 adapter that was built and not contributed. Note also that Meditecs sponsors and contributes to OIE.
+
+If the motivation is community contribution rather than shipping this workflow, raise it in OIE discussions first — the author of the JavaScript Reader approach in #170 has offered their code publicly.
+
+### 5.5 Identifying what an instrument actually speaks
+
+Framing and content vary independently, and datasheets conflate them. Capture the opening bytes before configuring anything:
+
+| First byte | Framing |
+|---|---|
+| `0x05` (`ENQ`) | ASTM E1381 |
+| `0x0B` (`VT`) | MLLP |
+
+Then check the first record: `MSH|` is HL7v2 content, `H|\^&` is ASTM E1394 content. Four combinations, and three of them occur in the field:
+
+| Framing | Content | Seen on |
+|---|---|---|
+| E1381 | E1394 | Most chemistry, haematology and coagulation analyzers |
+| E1381 | HL7v2 | GeneXpert in HL7 mode — Cepheid documents HL7 running over E1381-02 |
+| MLLP | HL7v2 | Mindray BC series, BD FACS Workflow Manager, HemoScreen |
+| E1381 | proprietary | Clinitek Status+, McKesson UA |
+
+Two consequences worth recording:
+
+- **Configure GeneXpert for ASTM mode, not HL7.** Its HL7 mode is HL7 content inside E1381 framing, so the MLLP listener in §3.4 will never see a frame, and `instruments/genexpert.py` in senaite.astm is written for ASTM mode. Choosing HL7 mode creates work for no benefit.
+- **Check whether the instrument dials out or listens.** Some analyzers are the TCP client and connect to the host on startup. Half of all "no data arriving" symptoms are this rather than framing.
+
+### 5.6 Worked survey — a three-instrument site
+
+| Instrument | Interface | Notes |
+|---|---|---|
+| Cepheid GeneXpert | ASTM E1394 over E1381, or HL7v2 over E1381 | Driver exists in senaite.astm. Xpress 5.1 is result-only; Dx and Infinity are bidirectional. Confirm which model |
+| BD BACTEC MGIT 960 | ASTM E1394 via BD EpiCenter | Does not interface directly — EpiCenter is the LIS-facing component. Confirm the site has it. Field mapping published in BD's LIS Vendor Interface Document (also mirrored on bikalims.org, so prior work may exist in the SENAITE lineage) |
+| Pluslife Mini Dock | Unknown | No published LIS interface specification found. Request one from the vendor, specifying whether it is E1381/E1394, HL7 over MLLP, or a REST API. If none exists, this is a manual-entry workflow and a scope conversation, not an integration |
+
+---
+
+## 6. Known Gaps
 
 Carried forward deliberately rather than hidden.
 
@@ -754,15 +885,26 @@ Carried forward deliberately rather than hidden.
 | 4 | `send-order-tcp` is disabled and the `update-result-status` filter keys on `log-to-db`. | Test-mode arrangement. Must be switched before deployment (§3.3) or orders are marked dispatched without transmission. |
 | 5 | No `simulated-instrument` channel exists; ports 6661/6663 are not yet bridged. | Full loop currently requires manual result injection. |
 | 6 | Source inbound data types on both JavaScript Reader channels are `XML` rather than `JSON`/`Raw`. | Harmless as written, because destination scripts read `getRawData()` directly, but misleading. Would break if any Mapper step were added. |
-| 7 | ASTM path is designed for but not implemented. | Only HL7v2 is proven. |
-| 8 | A result received but never posted sits at `dispatched` indefinitely. | Needs a stale-row alert. |
-| 9 | Exploratory channels (`fetch-users`, `fetch-diagnostic-reports-summary`, `dispatch-instrument-orders-old`) still present. | Delete before any site deployment. |
-| 10 | No automated test harness. | All verification is manual; see §2.5. |
+| 7 | ASTM is unimplemented and cannot be added by editing channels (§5). | Only HL7v2 over MLLP is proven. Serving an ASTM instrument requires senaite.astm upstream (§5.2) or the Meditecs extension (§5.3) — a deployment decision, not a configuration one. |
+| 8 | No route delivers orders to an ASTM instrument. | senaite.astm has no host-query implementation; the Meditecs ASTM Sender is untested here. IG step 3 is unproven for ASTM either way. |
+| 9 | A result received but never posted sits at `dispatched` indefinitely. | Needs a stale-row alert. |
+| 10 | Exploratory channels (`fetch-users`, `fetch-diagnostic-reports-summary`, `dispatch-instrument-orders-old`) still present. | Delete before any site deployment. |
+| 11 | No automated test harness. | All verification is manual; see §2.5. |
 
-## 6. Reference
+---
+
+## 7. Reference
 
 - [SENAITE FHIR IG](https://fhir.senaite.org/) — [Instrument Integration](https://fhir.senaite.org/instrument-integration.html)
 - [OIE documentation](https://docs.openintegrationengine.org/) · [GitHub](https://github.com/OpenIntegrationEngine)
 - [MirthSync](https://github.com/SagaHealthcareIT/mirthsync) — channel version control
 - [Administrator Launcher (MCAL)](https://www.meditecs.com/download-administrator-launcher/)
 - [Postgres JDBC driver](https://jdbc.postgresql.org/download/)
+
+ASTM:
+
+- [senaite.astm](https://github.com/senaite/senaite.astm) — ASTM/HL7 instrument server for SENAITE
+- [Meditecs ASTM Extension for OIE](https://www.meditecs.com/astm-extension-for-open-integration-engine/)
+- [OIE discussion #170](https://github.com/OpenIntegrationEngine/engine/discussions/170) — community ASTM approaches and maintainer response
+- [Cepheid GeneXpert LIS Interface Protocol Specification](https://infomine.cepheid.com/sites/default/files/2025-02/302-2261,%20Rev.%20F%20LIS%20Protocol%20Specification.pdf) (302-2261 Rev. F)
+- [BD MGIT 960 LIS Vendor Interface Document](https://www.bikalims.org/downloads/instrument-interface-specifications/bd-mgit-960)
