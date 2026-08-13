@@ -817,11 +817,7 @@ A commercial connector plugin: [ASTM Extension for Open Integration Engine](http
 
 **What it adds:** "ASTM Listener" and "ASTM Sender" connectors with a graphical configuration panel; outbound message templates for channel destinations; all three E1381 revisions (-91, -95, -02); TCP client or server operation; multiple connections on one port; CP-1252 encoding; and listener and sender sharing a single ASTM connection to one device. Serial instruments need a serial-to-TCP converter (MOXA is named). Roche Elecsys and Cobas frame structures are called out as specifically supported.
 
-**Why it is worth trialling despite the cost.** The ASTM Sender is the only route among the options here that gives orders outbound, so it is the only one that can satisfy IG step 3 without new protocol work. It also keeps frame-level traffic visible in the OIE dashboard rather than in a second process's logs.
-
-**Pricing:** €100/month (€1,200 annually) for one OIE instance and one device; €200/month (€2,400 annually) for up to five. A 30-day trial requires no credit card. The licence excludes professional services for device integration; a quote can be requested with the trial.
-
-**Trial plan.** Request Pro, not Smart — both are free for the trial month and Smart caps at one device. Do not start the clock until the analyzer is configured, on the network and reachable from the OIE host, or the window goes on cabling. Then prove, in order:
+To prove, in order:
 
 1. ASTM Listener receives and frames decode
 2. Decoded payload reaches a transformer and maps to `SenaiteObservation`
@@ -832,15 +828,8 @@ Capture a byte-level trace of a successful exchange while the trial is live. If 
 
 **Open question:** an OIE maintainer, replying to [OIE discussion #170](https://github.com/OpenIntegrationEngine/engine/discussions/170), noted the extension should work with OIE but suggested confirming with the vendor. A user in the same thread reports running it in two labs without issues but does not specify OIE or Mirth. Confirm compatibility with the pinned OIE version when requesting the trial.
 
-### 5.4 Route C — build an open-source connector
 
-Considered and not recommended for this project. Rough scope: 1–2 weeks for E1381 framing and state machine (one revision, results only), 2–4 weeks for OIE connector plugin scaffolding and the Swing configuration UI, 2–4 weeks for bidirectional operation over a shared connection, plus an unbounded tail of per-vendor frame quirks. Against €1,200/year that arithmetic does not work, and most of the effort is plugin integration wrapping protocol handling that senaite.astm already has.
-
-Requests for an open-source ASTM connector recur on the Mirth forums from 2010 onward and have never landed upstream, including at least one working LIS-1/E1381 adapter that was built and not contributed. Note also that Meditecs sponsors and contributes to OIE.
-
-If the motivation is community contribution rather than shipping this workflow, raise it in OIE discussions first — the author of the JavaScript Reader approach in #170 has offered their code publicly.
-
-### 5.5 Identifying what an instrument actually speaks
+### 5.4 Identifying what an instrument actually speaks
 
 Framing and content vary independently, and datasheets conflate them. Capture the opening bytes before configuring anything:
 
@@ -862,16 +851,6 @@ Two consequences worth recording:
 
 - **Configure GeneXpert for ASTM mode, not HL7.** Its HL7 mode is HL7 content inside E1381 framing, so the MLLP listener in §3.4 will never see a frame, and `instruments/genexpert.py` in senaite.astm is written for ASTM mode. Choosing HL7 mode creates work for no benefit.
 - **Check whether the instrument dials out or listens.** Some analyzers are the TCP client and connect to the host on startup. Half of all "no data arriving" symptoms are this rather than framing.
-
-### 5.6 Worked survey — a three-instrument site
-
-| Instrument | Interface | Notes |
-|---|---|---|
-| Cepheid GeneXpert | ASTM E1394 over E1381, or HL7v2 over E1381 | Driver exists in senaite.astm. Xpress 5.1 is result-only; Dx and Infinity are bidirectional. Confirm which model |
-| BD BACTEC MGIT 960 | ASTM E1394 via BD EpiCenter | Does not interface directly — EpiCenter is the LIS-facing component. Confirm the site has it. Field mapping published in BD's LIS Vendor Interface Document (also mirrored on bikalims.org, so prior work may exist in the SENAITE lineage) |
-| Pluslife Mini Dock | Unknown | No published LIS interface specification found. Request one from the vendor, specifying whether it is E1381/E1394, HL7 over MLLP, or a REST API. If none exists, this is a manual-entry workflow and a scope conversation, not an integration |
-
----
 
 ## 6. Known Gaps
 
